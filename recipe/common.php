@@ -11,14 +11,28 @@
 set('keep_releases', 3);
 set('shared_dirs', []);
 set('shared_files', []);
+set('copy_dirs', []);
 set('writable_dirs', []);
 set('writable_use_sudo', true); // Using sudo in writable commands?
+set('http_user', null);
 
 /**
  * Environment vars
  */
+env('timezone', 'UTC');
 env('branch', ''); // Branch to deploy.
 env('env_vars', ''); // For Composer installation. Like SYMFONY_ENV=prod
+env('composer_options', 'install --no-dev --verbose --prefer-dist --optimize-autoloader --no-progress --no-interaction');
+env('git_cache', function () { //whether to use git cache - faster cloning by borrowing objects from existing clones.
+    $gitVersion = run('git version');
+    $regs       = [];
+    if (preg_match('/((\d+\.?)+)/', $gitVersion, $regs)) {
+        $version = $regs[1];
+    } else {
+        $version = "1.0.0";
+    }
+    return version_compare($version, '2.3', '>=');
+});
 
 /**
  * Default arguments and options.
@@ -54,6 +68,37 @@ task('rollback', function () {
  * Preparing server for deployment.
  */
 task('deploy:prepare', function () {
+    \Deployer\Task\Context::get()->getServer()->connect();
+
+    // Check if shell is POSIX-compliant
+    try {
+        cd(''); // To run command as raw.
+        $result = run('echo $0')->toString();
+        if ($result == 'stdin: is not a tty') {
+            throw new RuntimeException(
+                "Looks like ssh inside another ssh.\n" .
+                "Help: http://goo.gl/gsdLt9"
+            );
+        }
+    } catch (\RuntimeException $e) {
+        $formatter = \Deployer\Deployer::get()->getHelper('formatter');
+
+        $errorMessage = [
+            "Shell on your server is not POSIX-compliant. Please change to sh, bash or similar.",
+            "Usually, you can change your shell to bash by running: chsh -s /bin/bash",
+        ];
+        write($formatter->formatBlock($errorMessage, 'error', true));
+
+        throw $e;
+    }
+
+    // Set the deployment timezone
+    if (!date_default_timezone_set(env('timezone'))) {
+        date_default_timezone_set('UTC');
+    }
+
+    run('if [ ! -d {{deploy_path}} ]; then mkdir -p {{deploy_path}}; fi');
+
     // Create releases dir.
     run("cd {{deploy_path}} && if [ ! -d releases ]; then mkdir releases; fi");
 
@@ -83,7 +128,7 @@ task('deploy:release', function () {
 
     run("mkdir $releasePath");
 
-    run("cd {{deploy_path}} && if [ -e release ]; then rm release; fi");
+    run("cd {{deploy_path}} && if [ -h release ]; then rm release; fi");
 
     run("ln -s $releasePath {{deploy_path}}/release");
 })->desc('Prepare release');
@@ -95,6 +140,9 @@ task('deploy:release', function () {
 task('deploy:update_code', function () {
     $repository = get('repository');
     $branch = env('branch');
+    $gitCache = env('git_cache');
+    $depth = $gitCache ? '' : '--depth 1';
+
     if (input()->hasOption('tag')) {
         $tag = input()->getOption('tag');
     }
@@ -102,14 +150,42 @@ task('deploy:update_code', function () {
     $at = '';
     if (!empty($tag)) {
         $at = "-b $tag";
-    } else if (!empty($branch)) {
+    } elseif (!empty($branch)) {
         $at = "-b $branch";
     }
 
-    run("git clone $at --depth 1 --recursive -q $repository {{release_path}} 2>&1");
+    $releases = env('releases_list');
+
+    if ($gitCache && isset($releases[1])) {
+        try {
+            run("git clone $at --recursive -q --reference {{deploy_path}}/releases/{$releases[1]} --dissociate $repository  {{release_path}} 2>&1");
+        } catch (RuntimeException $exc) {
+            // If {{deploy_path}}/releases/{$releases[1]} has a failed git clone, is empty, shallow etc, git would throw error and give up. So we're forcing it to act without reference in this situation
+            run("git clone $at --recursive -q $repository {{release_path}} 2>&1");
+        }
+    } else {
+        // if we're using git cache this would be identical to above code in catch - full clone. If not, it would create shallow clone.
+        run("git clone $at $depth --recursive -q $repository {{release_path}} 2>&1");
+    }
 
 })->desc('Updating code');
 
+/**
+ * Copy directories. Usefull for vendors directories
+ */
+task('deploy:copy_dirs', function () {
+
+    $dirs = get('copy_dirs');
+
+    foreach ($dirs as $dir) {
+        //Delete directory if exists
+        run("if [ -d $(echo {{release_path}}/$dir) ]; then rm -rf {{release_path}}/$dir; fi");
+
+        //Copy directory
+        run("if [ -d $(echo {{deploy_path}}/current/$dir) ]; then cp -rpf {{deploy_path}}/current/$dir {{release_path}}/$dir; fi");
+    }
+
+})->desc('Copy directories');
 
 /**
  * Create symlinks for shared directories and files.
@@ -134,7 +210,7 @@ task('deploy:shared', function () {
 
     foreach (get('shared_files') as $file) {
         // Remove from source
-        run("if [ -d $(echo {{release_path}}/$file) ]; then rm -rf {{release_path}}/$file; fi");
+        run("if [ -f $(echo {{release_path}}/$file) ]; then rm -rf {{release_path}}/$file; fi");
 
         // Create dir of shared file
         run("mkdir -p $sharedPath/" . dirname($file));
@@ -154,33 +230,60 @@ task('deploy:shared', function () {
 task('deploy:writable', function () {
     $dirs = join(' ', get('writable_dirs'));
     $sudo = get('writable_use_sudo') ? 'sudo' : '';
+    $httpUser = get('http_user');
 
     if (!empty($dirs)) {
-
-        $httpUser = run("ps aux | grep -E '[a]pache|[h]ttpd|[_]www|[w]ww-data|[n]ginx' | grep -v root | head -1 | cut -d\  -f1")->toString();
-
-        cd('{{release_path}}');
-
-        if (strpos(run("chmod 2>&1; true"), '+a') !== false) {
-
-            if (!empty($httpUser)) {
-                run("$sudo chmod +a \"$httpUser allow delete,write,append,file_inherit,directory_inherit\" $dirs");
+        try {
+            if (null === $httpUser) {
+                $httpUser = run("ps aux | grep -E '[a]pache|[h]ttpd|[_]www|[w]ww-data|[n]ginx' | grep -v root | head -1 | cut -d\  -f1")->toString();
             }
 
-            run("$sudo chmod +a \"`whoami` allow delete,write,append,file_inherit,directory_inherit\" $dirs");
+            cd('{{release_path}}');
 
-        } elseif (commandExist('setfacl')) {
+            if (strpos(run("chmod 2>&1; true"), '+a') !== false) {
+                if (!empty($httpUser)) {
+                    run("$sudo chmod +a \"$httpUser allow delete,write,append,file_inherit,directory_inherit\" $dirs");
+                }
 
-            if (!empty($httpUser)) {
-                run("$sudo setfacl -R -m u:\"$httpUser\":rwX -m u:`whoami`:rwX $dirs");
-                run("$sudo setfacl -dR -m u:\"$httpUser\":rwX -m u:`whoami`:rwX $dirs");
+                run("$sudo chmod +a \"`whoami` allow delete,write,append,file_inherit,directory_inherit\" $dirs");
+            } elseif (commandExist('setfacl')) {
+                if (!empty($httpUser)) {
+                    if (!empty($sudo)) {
+                        run("$sudo setfacl -R -m u:\"$httpUser\":rwX -m u:`whoami`:rwX $dirs");
+                        run("$sudo setfacl -dR -m u:\"$httpUser\":rwX -m u:`whoami`:rwX $dirs");
+                    } else {
+                        // When running without sudo, exception may be thrown
+                        // if executing setfacl on files created by http user (in directory that has been setfacl before).
+                        // These directories/files should be skipped.
+                        // Now, we will check each directory for ACL and only setfacl for which has not been set before.
+                        $writeableDirs = get('writable_dirs');
+                        foreach ($writeableDirs as $dir) {
+                            // Check if ACL has been set or not
+                            $hasfacl = run("getfacl -p $dir | grep \"^user:$httpUser:.*w\" | wc -l")->toString();
+                            // Set ACL for directory if it has not been set before
+                            if (!$hasfacl) {
+                                run("setfacl -R -m u:\"$httpUser\":rwX -m u:`whoami`:rwX $dir");
+                                run("setfacl -dR -m u:\"$httpUser\":rwX -m u:`whoami`:rwX $dir");
+                            }
+                        }
+                    }
+                } else {
+                    run("$sudo chmod 777 -R $dirs");
+                }
             } else {
-                run("$sudo chmod 777 $dirs");
+                run("$sudo chmod 777 -R $dirs");
             }
+        } catch (\RuntimeException $e) {
+            $formatter = \Deployer\Deployer::get()->getHelper('formatter');
 
+            $errorMessage = [
+                "Unable to setup correct permissions for writable dirs.                  ",
+                "You need co configure sudo's sudoers files to don't prompt for password,",
+                "or setup correct permissions manually.                                  ",
+            ];
+            write($formatter->formatBlock($errorMessage, 'error', true));
 
-        } else {
-            run("$sudo chmod 777 $dirs");
+            throw $e;
         }
     }
 
@@ -198,7 +301,8 @@ task('deploy:vendors', function () {
         $composer = 'php composer.phar';
     }
 
-    run("cd {{release_path}} && {{env_vars}} $composer install --no-dev --verbose --prefer-dist --optimize-autoloader --no-progress --no-scripts");
+    $composerEnvVars = env('env_vars') ? 'export ' . env('env_vars') . ' &&' : '';
+    run("cd {{release_path}} && $composerEnvVars $composer {{composer_options}}");
 
 })->desc('Installing vendors');
 
@@ -207,13 +311,8 @@ task('deploy:vendors', function () {
  * Create symlink to last release.
  */
 task('deploy:symlink', function () {
-    if (strpos(run('man mv'), '-T, --no-target-directory') !== false) {
-        run("cd {{deploy_path}} && mv -Tf release current"); // Linux
-    } else {
-        run("cd {{deploy_path}} && ln -sfn {{release_path}} current"); // Mac OS x
-        run("cd {{deploy_path}} && rm release");
-    }
-
+    run("cd {{deploy_path}} && ln -sfn {{release_path}} current"); // Atomic override symlink.
+    run("cd {{deploy_path}} && rm release"); // Remove release link.
 })->desc('Creating symlink to release');
 
 
@@ -228,6 +327,13 @@ env('releases_list', function () {
     return $list;
 });
 
+
+/**
+ * Return the current release timestamp
+ */
+env('release', function () {
+    return basename(env('current'));
+});
 
 /**
  * Return current release path.

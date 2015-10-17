@@ -15,13 +15,15 @@ class TaskTest extends \PHPUnit_Framework_TestCase
         $mock->expects($this->exactly(1))
             ->method('callback');
 
-        $task = new Task(function () use ($mock) {
+        $task = new Task('task_name', function () use ($mock) {
             $mock->callback();
         });
         
         $context = $this->getMockBuilder('Deployer\Task\Context')->disableOriginalConstructor()->getMock();
 
         $task->run($context);
+
+        $this->assertEquals('task_name', $task->getName());
 
         $task->desc('Task description.');
         $this->assertEquals('Task description.', $task->getDescription());
@@ -34,6 +36,13 @@ class TaskTest extends \PHPUnit_Framework_TestCase
         $this->assertTrue($task->runOnServer('server'));
 
         $task->onlyOn([]);
+        $this->assertTrue($task->runOnServer('server'));
+
+        $task->onlyOn('server');
+        $this->assertEquals(['server' => 0], $task->getOnlyOn());
+        $this->assertTrue($task->runOnServer('server'));
+
+        $task->onlyOn();
         $this->assertTrue($task->runOnServer('server'));
         
         $task->setPrivate();

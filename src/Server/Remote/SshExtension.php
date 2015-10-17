@@ -67,7 +67,7 @@ class SshExtension implements ServerInterface
 
                 break;
 
-            case Configuration::AUTH_BY_PUBLIC_KEY:
+            case Configuration::AUTH_BY_IDENTITY_FILE:
 
                 $authentication = new Ssh\Authentication\PublicKeyFile(
                     $serverConfig->getUser(),
@@ -84,7 +84,10 @@ class SshExtension implements ServerInterface
                 
             case Configuration::AUTH_BY_AGENT:
 
-                throw new \RuntimeException('If you want to use forward agent function, switch to using PhpSecLib.');
+                $authentication = new \Ssh\Authentication\Agent(
+                    $serverConfig->getUser()
+                );
+                break;
 
             default:
                 throw new \RuntimeException('You need to specify authentication method.');
@@ -139,7 +142,7 @@ class SshExtension implements ServerInterface
     {
         $this->checkConnection();
 
-        if(!$this->session->getSftp()->receive($remote, $local)) {
+        if (!$this->session->getSftp()->receive($remote, $local)) {
             throw new \RuntimeException('Can not download file.');
         }
     }

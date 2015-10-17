@@ -7,6 +7,8 @@
 
 namespace Deployer\Server;
 
+use Deployer\Type\DotArray;
+
 class Environment
 {
     const DEPLOY_PATH = 'deploy_path';
@@ -14,44 +16,94 @@ class Environment
     /**
      * Globally defaults values.
      *
-     * @var array
+     * @var \Deployer\Type\DotArray
      */
-    static private $defaults = [];
+    private static $defaults = null;
 
     /**
      * Array of env values.
+     * @var \Deployer\Type\DotArray
+     */
+    private $values = null;
+
+    /**
+     * Values represented by their keys here are protected, and cannot be
+     * changed by calling the `set` method.
      * @var array
      */
-    private $values = [];
+    private $protectedNames = [];
+
+    /**
+     * Constructor
+     */
+    public function __construct()
+    {
+        $this->values = new DotArray();
+    }
 
     /**
      * @param string $name
-     * @param int|string|array $value
+     * @param bool|int|string|array $value
      */
     public function set($name, $value)
     {
+        $this->checkIfNameIsProtected($name);
         $this->values[$name] = $value;
     }
 
     /**
      * @param string $name
-     * @param int|string|array $default
-     * @return int|string|array
+     * @param bool|int|string|array $value
+     */
+    public function setAsProtected($name, $value)
+    {
+        $this->set($name, $value);
+        $this->protectedNames[] = $name;
+    }
+
+    /**
+     * Checks whether the given name was registered as protected, or if there is
+     * a protected parameter which would be overwritten.
+     * @param string $name
+     * @throws \RuntimeException if the value already exists and is protected.
+     * @throws \RuntimeException if there's a protected parameter which would
+     * be overwritten.
+     */
+    private function checkIfNameIsProtected($name)
+    {
+        $length = strlen($name);
+        
+        foreach ($this->protectedNames as $protectedName) {
+            $len = strlen($protectedName);
+            if ($name === $protectedName) {
+                throw new \RuntimeException("The parameter `$name` cannot be set, because it's protected.");
+            } elseif ($len < $length && '.' === $name[$len] && 0 === strpos($name, $protectedName)) {
+                throw new \RuntimeException("The parameter `$name` cannot be set, because `$protectedName` is protected.");
+            } elseif ($len > $length && '.' === $protectedName[$length] && 0 === strpos($protectedName, $name)) {
+                throw new \RuntimeException("The parameter `$name` could not be set, because a protected parameter named `$protectedName` already exists.");
+            }
+        }
+    }
+
+    /**
+     * @param string $name
+     * @param bool|int|string|array $default
+     * @return bool|int|string|array
      * @throws \RuntimeException
      */
     public function get($name, $default = null)
     {
-        if (array_key_exists($name, $this->values)) {
+        if ($this->values->hasKey($name)) {
             $value = $this->values[$name];
         } else {
-            if (isset(self::$defaults[$name])) {
+            if (null !== self::$defaults && isset(self::$defaults[$name])) {
                 if (is_callable(self::$defaults[$name])) {
                     $value = $this->values[$name] = call_user_func(self::$defaults[$name]);
                 } else {
                     $value = $this->values[$name] = self::$defaults[$name];
                 }
             } else {
-                if ($default === null) {
+                if (null === $default) {
                     throw new \RuntimeException("Environment parameter `$name` does not exists.");
                 } else {
                     $value = $default;
@@ -63,10 +115,25 @@ class Environment
     }
 
     /**
+     * Checks if env var exists.
+     *
+     * @param string $name
+     * @return bool
+     */
+    public function has($name)
+    {
+        return $this->values->hasKey($name);
+    }
+
+    /**
+     * @param string $name
      * @return mixed
      */
     public static function getDefault($name)
     {
+        if (null === self::$defaults) {
+            self::$defaults = new DotArray();
+        }
         return self::$defaults[$name];
     }
 
@@ -76,6 +143,9 @@ class Environment
      */
     public static function setDefault($name, $value)
     {
+        if (null === self::$defaults) {
+            self::$defaults = new DotArray();
+        }
         self::$defaults[$name] = $value;
     }
 
@@ -88,7 +158,7 @@ class Environment
     public function parse($value)
     {
         if (is_string($value)) {
-            $value = preg_replace_callback('/\{\{\s*(\w+)\s*\}\}/', [$this, 'parseCallback'], $value);
+            $value = preg_replace_callback('/\{\{\s*([\w\.]+)\s*\}\}/', [$this, 'parseCallback'], $value);
         }
 
         return $value;
@@ -104,5 +174,4 @@ class Environment
     {
         return isset($matches[1]) ? $this->get($matches[1]) : null;
     }
-
 }

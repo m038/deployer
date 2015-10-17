@@ -49,7 +49,7 @@ class Informer
     public function endTask()
     {
         if ($this->output->getVerbosity() == OutputInterface::VERBOSITY_NORMAL && !$this->output->getWasWritten()) {
-            $this->output->write("\033[k\033[1A<info>✔</info>\n");
+            $this->output->write("\033[k\033[1A\r<info>✔</info>\n");
         } else {
             $this->output->writeln("<info>✔</info> Ok");
         }
@@ -77,7 +77,7 @@ class Informer
 
     /**
      * Print error.
-     * 
+     *
      * @param bool $nonFatal
      */
     public function taskError($nonFatal = true)

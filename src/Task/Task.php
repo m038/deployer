@@ -10,6 +10,11 @@ namespace Deployer\Task;
 class Task
 {
     /**
+     * @var string
+     */
+    private $name;
+
+    /**
      * Task code.
      * @var callable
      */
@@ -34,29 +39,53 @@ class Task
     private $onlyOn = [];
 
     /**
-     * Make task internal and not visible in CLI. 
+     * Make task internal and not visible in CLI.
      * @var bool
      */
     private $private = false;
 
     /**
-     * @param callable $callback Task code.
+     * @param string $name Tasks name
+     * @param \Closure $callback Task code.
      */
-    public function __construct(\Closure $callback)
+    public function __construct($name, \Closure $callback)
     {
+        $this->name = $name;
         $this->callback = $callback;
     }
 
     /**
      * Run task.
-     * 
+     *
      * @param Context $context
      */
     public function run(Context $context)
     {
         Context::push($context);
+        $env = $context->getEnvironment();
+
+        // Save cd's working_path path.
+        if ($env !== null) {
+            $workingPath = $env->get('working_path', false);
+        }
+
+        // Call tasks.
         call_user_func($this->callback);
+
+        // Restore cd's working_path path.
+        if ($env !== null && isset($workingPath)) {
+            $env->set('working_path', $workingPath);
+        }
+
         Context::pop();
+    }
+
+    /**
+     * @return string
+     */
+    public function getName()
+    {
+        return $this->name;
     }
 
     /**
@@ -97,12 +126,12 @@ class Task
     }
 
     /**
-     * @param array $servers
+     * @param array|string $servers
      * @return $this
      */
-    public function onlyOn($servers)
+    public function onlyOn($servers = [])
     {
-        $this->onlyOn = array_flip($servers);
+        $this->onlyOn = array_flip(is_array($servers) ? $servers : func_get_args());
         return $this;
     }
 
@@ -142,5 +171,6 @@ class Task
     public function setPrivate()
     {
         $this->private = true;
+        return $this;
     }
 }

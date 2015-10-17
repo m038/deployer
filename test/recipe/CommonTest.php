@@ -12,6 +12,11 @@ class CommonTest extends RecipeTester
     protected function loadRecipe()
     {
         require __DIR__ . '/../../recipe/common.php';
+
+        // Override update code task to use local copy.
+        task('deploy:update_code', function () {
+            runLocally('cp -R ' . __DIR__ . '/../fixture/app/. {{release_path}}');
+        });
     }
 
     public function testPrepare()
@@ -27,6 +32,22 @@ class CommonTest extends RecipeTester
         $this->exec('deploy:release');
 
         $this->assertFileExists(self::$deployPath . '/release');
+    }
+
+    public function testReleaseSymlink()
+    {
+        $removedDirectory = self::$deployPath . '/directory';
+        $releaseSymlink = self::$deployPath . '/release';
+
+        mkdir($removedDirectory);
+        unlink($releaseSymlink);
+        symlink($removedDirectory, $releaseSymlink);
+        rmdir($removedDirectory);
+
+        $this->exec('deploy:release');
+
+        $this->assertFileExists($releaseSymlink);
+        $this->assertTrue(is_dir(readlink($releaseSymlink)));
     }
 
     public function testUpdateCode()
@@ -61,6 +82,7 @@ class CommonTest extends RecipeTester
     public function testWriteable()
     {
         set('writable_dirs', ['app/cache', 'app/logs']);
+        set('writable_use_sudo', false);
 
         $this->exec('deploy:writable');
 
@@ -80,7 +102,8 @@ class CommonTest extends RecipeTester
         $this->exec('deploy:symlink');
 
         $this->assertTrue(realpath($this->getEnv('deploy_path') . '/current') !== false);
-        $this->assertTrue(!file_exists($this->getEnv('deploy_path') . '/release'));
+        clearstatcache($this->getEnv('deploy_path') . '/release');
+        $this->assertFalse(realpath($this->getEnv('deploy_path') . '/release') !== false, 'Symlink to release directory must gone after deploy:symlink.');
     }
 
     public function testCurrent()

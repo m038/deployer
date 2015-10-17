@@ -16,6 +16,7 @@ use Deployer\Task\GroupTask;
 use Deployer\Task\Scenario\GroupScenario;
 use Deployer\Task\Scenario\Scenario;
 use Deployer\Type\Result;
+use Symfony\Component\Yaml\Yaml;
 use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
@@ -30,16 +31,16 @@ use Symfony\Component\Console\Output\OutputInterface;
 
 /**
  * @param string $name
- * @param string|null $domain
+ * @param string|null $host
  * @param int $port
  * @return Builder
  */
-function server($name, $domain = null, $port = 22)
+function server($name, $host = null, $port = 22)
 {
     $deployer = Deployer::get();
 
     $env = new Environment();
-    $config = new Configuration($name, $domain, $port);
+    $config = new Configuration($name, $host, $port);
 
     if ($deployer->parameters->has('ssh_type') && $deployer->parameters->get('ssh_type') === 'ext-ssh2') {
         $server = new Remote\SshExtension($config);
@@ -74,6 +75,78 @@ function localServer($name)
 
 
 /**
+ * Load server list file.
+ * @param string $file
+ */
+function serverList($file)
+{
+    $serverList = Yaml::parse(file_get_contents($file));
+
+    foreach ((array)$serverList as $name => $config) {
+        try {
+            if (!is_array($config)) {
+                throw new \RuntimeException();
+            }
+
+            $da = new \Deployer\Type\DotArray($config);
+
+            if ($da->hasKey('local')) {
+                $builder = localServer($name);
+            } else {
+                $builder = $da->hasKey('port') ? server($name, $da['host'], $da['port']) : server($name, $da['host']);
+            }
+
+            unset($da['local']);
+            unset($da['host']);
+            unset($da['port']);
+
+            if ($da->hasKey('identity_file')) {
+                if ($da['identity_file'] === null) {
+                    $builder->identityFile();
+                } else {
+                    $builder->identityFile(
+                        $da['identity_file.public_key'],
+                        $da['identity_file.private_key'],
+                        $da['identity_file.password']
+                    );
+                }
+
+                unset($da['identity_file']);
+            }
+
+            if ($da->hasKey('identity_config')) {
+                if ($da['identity_config'] === null) {
+                    $builder->configFile();
+                } else {
+                    $builder->configFile($da['identity_config']);
+                }
+                unset($da['identity_config']);
+            }
+
+            if ($da->hasKey('forward_agent')) {
+                $builder->forwardAgent();
+                unset($da['forward_agent']);
+            }
+
+            foreach (['user', 'password', 'stage', 'pem_file'] as $key) {
+                if ($da->hasKey($key)) {
+                    $method = lcfirst(str_replace(' ', '', ucwords(str_replace('_', ' ', $key))));
+                    $builder->$method($da[$key]);
+                    unset($da[$key]);
+                }
+            }
+
+            // Everything else are env vars.
+            foreach ($da->toArray() as $key => $value) {
+                $builder->env($key, $value);
+            }
+        } catch (\RuntimeException $e) {
+            throw new \RuntimeException("Error in parsing `$file` file.");
+        }
+    }
+}
+
+/**
  * Define a new task and save to tasks list.
  *
  * @param string $name Name of current task.
@@ -86,9 +159,9 @@ function task($name, $body)
     $deployer = Deployer::get();
 
     if ($body instanceof \Closure) {
-        $task = new TheTask($body);
+        $task = new TheTask($name, $body);
         $scenario = new Scenario($name);
-    } else if (is_array($body)) {
+    } elseif (is_array($body)) {
         $task = new GroupTask();
         $scenario = new GroupScenario(array_map(function ($name) use ($deployer) {
             return $deployer->scenarios->get($name);
@@ -135,9 +208,9 @@ function after($it, $that)
 
 /**
  * Add users arguments.
- * 
- * Note what Deployer already has one argument: "stage". 
- * 
+ *
+ * Note what Deployer already has one argument: "stage".
+ *
  * @param string $name
  * @param int $mode
  * @param string $description
@@ -152,7 +225,7 @@ function argument($name, $mode = null, $description = '', $default = null)
 
 /**
  * Add users options.
- * 
+ *
  * @param string $name
  * @param string $shortcut
  * @param int $mode
@@ -247,7 +320,10 @@ function runAs($command, $username)
         $runAs = "sudo -u $username";
     }
 
-    $command = "cd $workingPath && $runAs $command";
+    $command = "$runAs $command";
+    if (!empty($workingPath)) {
+        $command = "cd $workingPath && $command";
+    }
 
     if (isVeryVerbose()) {
         writeln("<comment>Run</comment>: $command");
@@ -268,20 +344,34 @@ function runAs($command, $username)
  * Execute commands on local machine.
  * @param string $command Command to run locally.
  * @param int $timeout (optional) Override process command timeout in seconds.
- * @return string Output of command.
+ * @return Result Output of command.
  * @throws \RuntimeException
  */
 function runLocally($command, $timeout = 60)
 {
+    $command = env()->parse($command);
+
+    if (isVeryVerbose()) {
+        writeln("<comment>Run locally</comment>: $command");
+    }
+
     $process = new Symfony\Component\Process\Process($command);
     $process->setTimeout($timeout);
-    $process->run();
+    $process->run(function ($type, $buffer) {
+        if (isDebug()) {
+            if ('err' === $type) {
+                write("<fg=red>></fg=red> $buffer");
+            } else {
+                write("<fg=green>></fg=green> $buffer");
+            }
+        }
+    });
 
     if (!$process->isSuccessful()) {
         throw new \RuntimeException($process->getErrorOutput());
     }
-
-    write($process->getOutput());
+    
+    return new Result($process->getOutput());
 }
 
 /**
@@ -293,17 +383,14 @@ function runLocally($command, $timeout = 60)
 function upload($local, $remote)
 {
     $server = Context::get()->getServer();
-
-    $remote = env()->get(Environment::DEPLOY_PATH) . '/' . $remote;
+    $local = env()->parse($local);
+    $remote = env()->parse($remote);
 
     if (is_file($local)) {
-
         writeln("Upload file <info>$local</info> to <info>$remote</info>");
 
         $server->upload($local, $remote);
-
     } elseif (is_dir($local)) {
-
         writeln("Upload from <info>$local</info> to <info>$remote</info>");
 
         $finder = new Symfony\Component\Finder\Finder();
@@ -321,7 +408,6 @@ function upload($local, $remote)
                 $remote . '/' . $file->getRelativePathname()
             );
         }
-
     } else {
         throw new \RuntimeException("Uploading path '$local' does not exist.");
     }
@@ -376,9 +462,19 @@ function get($key)
 }
 
 /**
+ * @param string $key
+ * @return boolean
+ */
+function has($key)
+{
+    return Deployer::get()->parameters->has($key);
+}
+
+/**
  * @param string $message
  * @param string|null $default
  * @return string
+ * @codeCoverageIgnore
  */
 function ask($message, $default = null)
 {
@@ -399,6 +495,7 @@ function ask($message, $default = null)
  * @param string $message
  * @param bool $default
  * @return bool
+ * @codeCoverageIgnore
  */
 function askConfirmation($message, $default = false)
 {
@@ -419,6 +516,7 @@ function askConfirmation($message, $default = false)
 /**
  * @param string $message
  * @return string
+ * @codeCoverageIgnore
  */
 function askHiddenResponse($message)
 {
@@ -504,7 +602,7 @@ function env($name = null, $value = null)
     } else {
         if (null === $name && null === $value) {
             return Context::get()->getEnvironment();
-        } else if (null !== $name && null === $value) {
+        } elseif (null !== $name && null === $value) {
             return Context::get()->getEnvironment()->get($name);
         } else {
             Context::get()->getEnvironment()->set($name, $value);

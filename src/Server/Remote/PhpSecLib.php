@@ -46,7 +46,7 @@ class PhpSecLib implements ServerInterface
     public function connect()
     {
         $serverConfig = $this->getConfiguration();
-        $this->sftp = new SFTP($serverConfig->getHost(), $serverConfig->getPort());
+        $this->sftp = new SFTP($serverConfig->getHost(), $serverConfig->getPort(), 3600);
 
         switch ($serverConfig->getAuthenticationMethod()) {
             case Configuration::AUTH_BY_PASSWORD:
@@ -55,7 +55,7 @@ class PhpSecLib implements ServerInterface
 
                 break;
 
-            case Configuration::AUTH_BY_PUBLIC_KEY:
+            case Configuration::AUTH_BY_IDENTITY_FILE:
 
                 $key = new RSA();
                 $key->setPassword($serverConfig->getPassPhrase());
@@ -76,6 +76,7 @@ class PhpSecLib implements ServerInterface
             case Configuration::AUTH_BY_AGENT:
 
                 $key = new Agent();
+                $key->startSSHForwarding(null);
                 $result = $this->sftp->login($serverConfig->getUser(), $key);
 
                 break;
@@ -84,7 +85,7 @@ class PhpSecLib implements ServerInterface
                 throw new RuntimeException('You need to specify authentication method.');
         }
 
-        if ( ! $result) {
+        if (!$result) {
             throw new RuntimeException('Unable to login with the provided credentials.');
         }
     }
